@@ -13,13 +13,9 @@ geolocator = Nominatim(user_agent="weather_arb_v2026_final")
 
 st.title("🌡️ Weather Arb: 10-Model Consensus Terminal")
 
-# --- UNIT CONVERSION UTILS ---
-def c_to_f(c): return (c * 9/5) + 32
-def f_to_c(f): return (f - 32) * 5/9
-
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("📍 Settings")
+    st.header("📍 Location & Date")
     address = st.text_input("Target City", "London, UK")
     selected_date = st.date_input("Forecast Date", value=date.today() + timedelta(days=1))
     
@@ -27,19 +23,20 @@ with st.sidebar:
     unit = st.toggle("Display in Fahrenheit", value=False)
     u_lab = "°F" if unit else "°C"
     
-    # Adjust slider scale based on unit
     if unit:
-        target_temp = st.slider(f"Polymarket Hurdle ({u_lab})", 14.0, 115.0, 86.0, step=1.0)
-        actual_target_c = f_to_c(target_temp) # Convert back to C for API logic
+        target_temp = st.slider(f"Market Hurdle ({u_lab})", 14.0, 115.0, 86.0, step=1.0)
+        actual_target_c = (target_temp - 32) * 5/9
     else:
-        target_temp = st.slider(f"Polymarket Hurdle ({u_lab})", -10.0, 45.0, 30.0, step=0.5)
+        target_temp = st.slider(f"Market Hurdle ({u_lab})", -10.0, 45.0, 30.0, step=0.5)
         actual_target_c = target_temp
 
     st.header("🎯 Market Parameters")
-    bet_side = st.radio("Analyzing Side:", ["Yes (> Target)", "No (≤ Target)"])
+    # Clarified Labels for Betting
+    bet_side = st.radio("My Bet Side:", ["Yes (Expect ABOVE Hurdle)", "No (Expect BELOW Hurdle)"])
+    
     col_p1, col_p2 = st.columns(2)
-    yes_p = col_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50, step=0.01)
-    no_p = col_p2.number_input("'No' Price", 0.01, 0.99, 0.50, step=0.01)
+    yes_p = col_p1.number_input("'Yes' Mkt Price", 0.01, 0.99, 0.50, step=0.01)
+    no_p = col_p2.number_input("'No' Mkt Price", 0.01, 0.99, 0.50, step=0.01)
     
     st.header("⚖️ Model Weights")
     w_ecmwf = st.slider("ECMWF weight", 1.0, 5.0, 2.0)
@@ -86,7 +83,7 @@ if run_btn:
         weather_results = loop.run_until_complete(run_ensemble(lat, lon, date_str))
 
         if weather_results:
-            # Stats using Celsius internally
+            # Internal Math (Celsius)
             core_temps = [r["Temp"] for r in weather_results if r["Model"] in ["ECMWF", "GFS", "ICON"]]
             temp_spread = max(core_temps) - min(core_temps) if len(core_temps) > 1 else 0
             
@@ -94,48 +91,40 @@ if run_btn:
             w_avg_c = sum(r["Temp"] * r["Weight"] for r in weather_results) / total_w
             p_yes = sum(r["Weight"] for r in weather_results if r["Temp"] > actual_target_c) / total_w
             
-            # Betting Logic
+            # Prediction Logic
             m_prob = p_yes if "Yes" in bet_side else (1.0 - p_yes)
             m_price = yes_p if "Yes" in bet_side else no_p
             edge = m_prob - m_price
             
-            # Risk Adjusted Thresholds
+            # Risk Adjustment
             days_out = (selected_date - date.today()).days
             min_edge = 0.04 + (temp_spread * 0.01) + (days_out * 0.005)
             risk_adj_buy_below = m_prob - min_edge
 
-            # UI Conversions
-            disp_avg = c_to_f(w_avg_c) if unit else w_avg_c
-            disp_spread = (temp_spread * 1.8) if unit else temp_spread
+            # Display Conversions
+            disp_avg = (w_avg_c * 9/5 + 32) if unit else w_avg_c
             df = pd.DataFrame(weather_results)
-            if unit: df["Temp"] = df["Temp"].apply(c_to_f)
+            if unit: df["Temp"] = df["Temp"].apply(lambda x: (x * 9/5) + 32)
 
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader(f"🌐 Ensemble Coverage ({u_lab})")
                 st.dataframe(df.sort_values("Temp", ascending=False), hide_index=True)
-                st.metric("Model Agreement", "Strong" if temp_spread < 1.5 else "Weak", delta=f"{disp_spread:.1f}{u_lab} Spread", delta_color="inverse")
-                fig_hist = px.histogram(df, x="Temp", nbins=12, title=f"Distribution ({u_lab})")
-                fig_hist.add_vline(x=target_temp, line_dash="dash", line_color="red")
-                st.plotly_chart(fig_hist, use_container_width=True)
-
+                st.metric("Model Agreement", "Strong" if temp_spread < 1.5 else "Weak", delta=f"{temp_spread:.1f}°C Spread", delta_color="inverse")
+                
             with col2:
                 st.subheader("📊 Quant Results")
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number", value=disp_avg, title={'text': f"Weighted Mean ({u_lab})"},
-                    gauge={'axis': {'range': [None, 120 if unit else 45]}, 'threshold': {'line': {'color': "red", 'width': 4}, 'value': target_temp}}
-                ))
-                st.plotly_chart(fig_gauge, use_container_width=True)
-
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Model Prob", f"{int(m_prob*100)}%")
                 m2.metric("Market Price", f"${m_price:.2f}")
                 m3.metric("Edge", f"{edge*100:+.1f}%")
 
                 st.divider()
-                color = "#00ff00" if edge > min_edge else "#ff4b4b" if edge < 0 else "orange"
-                st.markdown(f"### Status: <span style='color:{color}'>{'BUY' if edge > min_edge else 'AVOID'}</span>", unsafe_allow_html=True)
-                st.write(f"**Potential Net Profit**: ${((wager_amount/m_price)-wager_amount):.2f}")
-                st.write(f"**Risk-Adj Buy Below:** ${risk_adj_buy_even:.2f}" if 'risk_adj_buy_even' in locals() else f"**Risk-Adj Buy Below:** ${risk_adj_buy_below:.2f}")
+                color = "#00ff00" if edge > min_edge else "orange" if edge > 0 else "#ff4b4b"
+                status = "🔥 BUY SIGNAL" if edge > min_edge else "⚖️ HOLD/AVOID" if edge > 0 else "🚫 OVERVALUED"
+                
+                st.markdown(f"### Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+                st.write(f"**Target Buy Price (Risk-Adj):** ${risk_adj_buy_below:.2f}")
+                st.write(f"**Potential Net Profit:** ${((wager_amount/m_price)-wager_amount):.2f}")
         else:
-            st.error("No model data returned.")
+            st.error("No data returned.")
