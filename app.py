@@ -7,7 +7,7 @@ from geopy.geocoders import Nominatim
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_final_v5")
+geolocator = Nominatim(user_agent="weather_arb_final_v6")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -19,22 +19,17 @@ st.markdown("Compare the 'Big 8' Global Weather Models against Market Odds.")
 with st.sidebar:
     st.header("📍 Search Location")
     
-    if st.session_state.history:
-        selected_history = st.selectbox("Recent Searches", [""] + st.session_state.history)
-        address_input = selected_history if selected_history else st.text_input("Enter City", "London, UK")
-    else:
-        address_input = st.text_input("Enter City", "London, UK")
+    address_input = st.text_input("Enter City", "London, UK")
 
     location = geolocator.geocode(address_input, timeout=10)
     if location:
-        lat, lon = round(location.latitude, 2), round(location.longitude, 2)
-        st.success(f"Coordinates: {lat}, {lon}")
-        if address_input not in st.session_state.history:
-            st.session_state.history.insert(0, address_input)
-            st.session_state.history = st.session_state.history[:5]
+        # We format as strings first to ensure NO extra trailing digits are sent
+        lat_str = "{:.2f}".format(location.latitude)
+        lon_str = "{:.2f}".format(location.longitude)
+        st.success(f"Coordinates: {lat_str}, {lon_str}")
     else:
         st.error("Location not found. Using default.")
-        lat, lon = 51.51, -0.13
+        lat_str, lon_str = "51.51", "-0.13"
 
     st.header("🎯 Market Parameters")
     target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
@@ -45,6 +40,7 @@ with st.sidebar:
 col1, col2 = st.columns(2)
 
 if run_btn:
+    # We use the most stable identifiers for these 8 models
     models = [
         "ecmwf_ifs025", "gfs_seamless", "icon_seamless", "gem_seamless", 
         "jma_seamless", "bom_access_g_global", "arpege_world", "cma_grapes_global"
@@ -53,46 +49,42 @@ if run_btn:
     weather_data = []
     temps = []
 
-    # Progress bar for better user experience
-    progress_text = "Checking global weather centers..."
+    progress_text = "Contacting Global Weather Centers..."
     my_bar = st.progress(0, text=progress_text)
 
-    # LOOP THROUGH MODELS INDIVIDUALLY
     for i, m in enumerate(models):
-        url = "https://ensemble-api.open-meteo.com/v1/ensemble"
-        # We use rounded floats to ensure the API accepts the numbers
-        params = {
-            "latitude": float(lat), "longitude": float(lon), 
-            "daily": "temperature_2m_max", "models": m, "timezone": "auto"
-        }
+        # NEW URL STRATEGY: We build the URL manually to ensure zero formatting errors
+        url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat_str}&longitude={lon_str}&daily=temperature_2m_max&models={m}&timezone=auto"
         
         try:
-            resp = requests.get(url, params=params, timeout=5)
+            resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                key = f'temperature_2m_max_{m}'
-                if 'daily' in data and key in data['daily']:
-                    val = data['daily'][key][0]
+                # Dynamically find the key because the API sometimes changes the suffix
+                daily_keys = data.get('daily', {}).keys()
+                temp_key = [k for k in daily_keys if 'temperature_2m_max' in k]
+                
+                if temp_key:
+                    val = data['daily'][temp_key[0]][0]
                     if val is not None:
                         weather_data.append({"Model": m.split('_')[0].upper(), "Max Temp": val})
                         temps.append(val)
-        except:
-            # SILENT FAILURE: If one model is down, we skip it
-            pass
+        except Exception as e:
+            pass # Skip failed models silently
         
         my_bar.progress((i + 1) / len(models), text=progress_text)
     
     my_bar.empty()
 
     if not temps:
-        st.error("All models failed for this exact spot. Try a broader city name like 'London' or 'New York' instead of a specific airport.")
+        st.error("The weather server is rejecting these coordinates. Try searching for a different nearby city (e.g., 'Watford' or 'Croydon') to reset the grid locator.")
     else:
         avg_temp = statistics.mean(temps)
         model_prob = len([t for t in temps if t >= target_temp]) / len(temps)
         edge = model_prob - market_price
 
         with col1:
-            st.subheader(f"🌐 Ensemble Results ({len(temps)}/8 Models)")
+            st.subheader(f"🌐 Ensemble Results ({len(temps)}/8)")
             st.table(pd.DataFrame(weather_data))
             fig = px.histogram(x=temps, nbins=5, title="Model Spread", labels={'x': 'Temp °C'})
             fig.add_vline(x=target_temp, line_dash="dash", line_color="red")
@@ -113,7 +105,6 @@ if run_btn:
             
             st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_content_allowed=True)
             st.metric("Calculated Edge", f"{edge*100:.1f}%")
-            st.caption(f"Based on {len(temps)} active models.")
 
 else:
     with col1: st.info("Search a city and click 'Calculate' to begin.")
