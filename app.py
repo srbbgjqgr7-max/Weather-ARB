@@ -21,7 +21,7 @@ with st.sidebar:
     selected_date = st.date_input("Forecast Date", value=date.today() + timedelta(days=1))
     
     st.header("🎯 Market Parameters")
-    target_temp = st.slider("Polymarket Hurdle (°C)", 10.0, 45.0, 30.0, step=0.5)
+    target_temp = st.slider("Polymarket Hurdle (°C)", -10.0, 45.0, 30.0, step=1)
     bet_side = st.radio("Analyzing Side:", ["Yes (> Target)", "No (≤ Target)"])
     
     col_p1, col_p2 = st.columns(2)
