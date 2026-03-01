@@ -3,16 +3,17 @@ import requests
 import pandas as pd
 import statistics
 import plotly.express as px
+import plotly.graph_objects as go # Added for the Gauge Figure
 from geopy.geocoders import Nominatim
 from datetime import datetime, date, timedelta
 import time
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_v15_inclusive")
+geolocator = Nominatim(user_agent="weather_arb_v15_weighted_fig")
 
 st.title("🌡️ Weather vs. Polymarket Arbitrage")
-st.markdown("Global Ensemble Models + Date Selection + **Inclusive 'No' Logic (≤ Target)**")
+st.markdown("Global Ensemble Models + **Weighted Mean Visualization**")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -36,8 +37,6 @@ with st.sidebar:
 
     st.header("🎯 Market Parameters")
     target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
-    
-    # Updated labels for clarity
     bet_side = st.radio("Analyzing Side:", ["Yes (Strictly Above >)", "No (Lower or Equal ≤)"])
     
     c_p1, c_p2 = st.columns(2)
@@ -67,14 +66,14 @@ if run_btn:
     }
     
     weather_results = []
+    weighted_temps = []
     weighted_votes_above = []
     total_possible_weight = 0
     
-    progress_bar = st.progress(0, text=f"Fetching Models for {date_str}...")
+    progress_bar = st.progress(0, text=f"Fetching Models...")
 
     for i, (name, config) in enumerate(model_config.items()):
-        api_id = config["id"]
-        weight = config["weight"]
+        api_id, weight = config["id"], config["weight"]
         coords_to_try = [(lat, lon), (round(lat, 1), round(lon, 1))]
         
         for try_lat, try_lon in coords_to_try:
@@ -90,76 +89,65 @@ if run_btn:
                         val = data['daily'][temp_key[0]][0]
                         if val is not None:
                             weather_results.append({"Model": name, "Max Temp": val, "Weight": weight})
-                            
-                            # LOGIC CHANGE: 
-                            # 'Yes' only wins if strictly GREATER than target
-                            is_above = 1 if val > target_temp else 0
-                            weighted_votes_above.append(is_above * weight)
-                            
+                            weighted_temps.append(val * weight)
+                            weighted_votes_above.append((1 if val > target_temp else 0) * weight)
                             total_possible_weight += weight
                             break
-            except:
-                continue
+            except: continue
         progress_bar.progress((i + 1) / len(model_config))
     
     progress_bar.empty()
 
-    if not weather_results:
-        st.error(f"No model data found for {date_str}.")
-    else:
+    if weather_results:
         # --- CALCULATIONS ---
-        avg_temp = statistics.mean([r["Max Temp"] for r in weather_results])
-        
-        # YES Probability (Strictly Above)
+        weighted_avg_temp = sum(weighted_temps) / total_possible_weight
         prob_above = round(sum(weighted_votes_above) / total_possible_weight, 2)
-        
-        # NO Probability (Lower or Equal)
         prob_below = 1.0 - prob_above
         
-        # Determine Market vs Model comparison based on selection
-        if "Yes" in bet_side:
-            curr_mkt = yes_price
-            mod_prob = prob_above
-        else:
-            curr_mkt = no_price
-            mod_prob = prob_below
-            
+        curr_mkt = yes_price if "Yes" in bet_side else no_price
+        mod_prob = prob_above if "Yes" in bet_side else prob_below
         edge = mod_prob - curr_mkt
-        total_payout = wager_amount / curr_mkt
-        net_profit = total_payout - wager_amount
+        net_profit = (wager_amount / curr_mkt) - wager_amount
 
         with col1:
-            st.subheader(f"🌐 {date_str} Results ({len(weather_results)}/8)")
+            st.subheader(f"🌐 Ensemble Spread ({date_str})")
+            fig_hist = px.histogram(pd.DataFrame(weather_results), x="Max Temp", nbins=8, 
+                                   labels={'Max Temp': 'Temp °C'}, color_discrete_sequence=['#636EFA'])
+            fig_hist.add_vline(x=target_temp, line_dash="dash", line_color="red", annotation_text="Hurdle")
+            st.plotly_chart(fig_hist, use_container_width=True)
             st.table(pd.DataFrame(weather_results))
-            
-            fig = px.histogram(x=[r["Max Temp"] for r in weather_results], nbins=8, 
-                               title=f"Ensemble Spread for {date_str}", labels={'x': 'Temp °C'})
-            fig.add_vline(x=target_temp, line_dash="dash", line_color="red", annotation_text="Hurdle")
-            st.plotly_chart(fig, width="stretch")
 
         with col2:
-            st.subheader(f"⚖️ Betting Analysis: {bet_side}")
-            m1, m2 = st.columns(2)
-            m1.metric("Market Price", f"${curr_mkt:.2f}")
-            m2.metric("Weighted Prob", f"{int(mod_prob*100)}%")
+            st.subheader("📊 Weighted Average Figure")
+            # --- GAUGE FIGURE ---
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number",
+                value = weighted_avg_temp,
+                domain = {'x': [0, 1], 'y': [0, 1]},
+                title = {'text': "Weighted Mean Max Temp (°C)", 'font': {'size': 18}},
+                gauge = {
+                    'axis': {'range': [None, 45], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                    'bar': {'color': "#636EFA"},
+                    'bgcolor': "white",
+                    'borderwidth': 2,
+                    'bordercolor': "gray",
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': target_temp
+                    }
+                }
+            ))
+            fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
+            # --- STATS ---
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Model Prob", f"{int(mod_prob*100)}%")
+            m2.metric("Market Price", f"${curr_mkt:.2f}")
+            m3.metric("Edge", f"{edge*100:.1f}%")
             
             st.divider()
-            
             color = "green" if edge > 0.05 else "red" if edge < -0.05 else "gray"
-            status = "UNDERVALUED" if edge > 0.05 else "OVERVALUED" if edge < -0.05 else "EFFICIENT"
-            st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
-            st.metric("Calculated Edge", f"{edge*100:.1f}%")
-
-            st.subheader("💰 Risk/Reward")
-            p1, p2 = st.columns(2)
-            p1.metric("Potential Profit", f"${net_profit:.2f}")
-            p2.metric("ROI", f"{int((net_profit/wager_amount)*100)}%")
-            
-            # Contextual Reminder
-            if "No" in bet_side:
-                st.info(f"ℹ️ 'No' wins if the temp is {target_temp}°C or lower.")
-            else:
-                st.info(f"ℹ️ 'Yes' wins if the temp is strictly above {target_temp}°C.")
-
-else:
-    st.info(f"👈 Select your target date and click 'Calculate'.")
+            st.markdown(f"### Status: <span style='color:{color}'>{'UNDERVALUED' if edge > 0.05 else 'OVERVALUED' if edge < -0.05 else 'EFFICIENT'}</span>", unsafe_allow_html=True)
+            st.write(f"Potential Profit on ${wager_amount}: **${net_profit:.2f}**")
