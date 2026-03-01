@@ -7,7 +7,8 @@ from geopy.geocoders import Nominatim
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Dashboard")
-geolocator = Nominatim(user_agent="weather_arb_app_2026")
+# Initialize Geocoder with a custom user agent
+geolocator = Nominatim(user_agent="weather_arb_app_v2_2026")
 
 st.title("🌡️ Weather vs. Polymarket Arbitrage")
 st.markdown("Compare the 'Big 8' Global Weather Models against Market Odds.")
@@ -15,16 +16,22 @@ st.markdown("Compare the 'Big 8' Global Weather Models against Market Odds.")
 # --- SIDEBAR: INPUTS & SEARCH ---
 with st.sidebar:
     st.header("📍 Search Location")
-    address = st.text_input("Enter City (e.g., London, UK)", "New York, USA")
+    address = st.text_input("Enter City (e.g., London, UK)", "London, UK")
     
-    # Geocoding Logic
-    location = geolocator.geocode(address)
-    if location:
-        lat, lon = location.latitude, location.longitude
-        st.success(f"Location Found: {lat:.2f}, {lon:.2f}")
-    else:
-        st.error("Location not found.")
-        lat, lon = 40.71, -74.00
+    # Geocoding Logic with Rounding Fix
+    try:
+        location = geolocator.geocode(address, timeout=10)
+        if location:
+            # FIX: Rounding to 2 decimal places prevents Error 400
+            lat = round(location.latitude, 2)
+            lon = round(location.longitude, 2)
+            st.success(f"Location Found: {lat}, {lon}")
+        else:
+            st.error("Location not found. Using default (London).")
+            lat, lon = 51.50, -0.12
+    except:
+        st.error("Geocoding service busy. Using default (London).")
+        lat, lon = 51.50, -0.12
 
     st.header("🎯 Market Parameters")
     target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
@@ -52,10 +59,11 @@ if run_btn:
     }
 
     try:
-        response_raw = requests.get(url, params=params)
+        # Added timeout to prevent hanging
+        response_raw = requests.get(url, params=params, timeout=15)
         
         if response_raw.status_code != 200:
-            st.error(f"Weather server busy (Error {response_raw.status_code}). Please wait 10 seconds.")
+            st.error(f"Weather server rejected request (Error {response_raw.status_code}). Try a different city.")
         else:
             response = response_raw.json()
             weather_data = []
@@ -71,7 +79,7 @@ if run_btn:
                         temps.append(val)
 
             if not temps:
-                st.warning("No model data available for this specific coordinate. Try a larger city.")
+                st.warning("No model data available for this coordinate. Try a major city like 'Paris' or 'Tokyo'.")
             else:
                 # --- CALCULATIONS ---
                 avg_temp = statistics.mean(temps)
@@ -94,8 +102,8 @@ if run_btn:
                     st.metric("Ensemble Mean", f"{avg_temp:.1f}°C")
                     
                     c1, c2 = st.columns(2)
-                    c1.write(f"**Market Prob:** {market_price*100:.0f}%")
-                    c2.write(f"**Model Prob:** {model_prob*100:.0f}%")
+                    c1.metric("Market Prob", f"{market_price*100:.0f}%")
+                    c2.metric("Model Prob", f"{model_prob*100:.0f}%")
                     
                     st.divider()
                     
@@ -108,7 +116,7 @@ if run_btn:
                         st.write("✅ Market is efficiently priced.")
 
     except Exception as e:
-        st.error(f"Unexpected Error: {e}")
+        st.error(f"Connection Error: {e}")
 
 else:
     with col1: st.info("Search a city and click 'Calculate' to see weather models.")
