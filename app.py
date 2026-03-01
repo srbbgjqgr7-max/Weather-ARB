@@ -7,7 +7,7 @@ from geopy.geocoders import Nominatim
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_final_v4")
+geolocator = Nominatim(user_agent="weather_arb_final_v5")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -53,15 +53,16 @@ if run_btn:
     weather_data = []
     temps = []
 
-    # Progress bar to show the app is working through the models
-    progress_text = "Fetching weather models..."
+    # Progress bar for better user experience
+    progress_text = "Checking global weather centers..."
     my_bar = st.progress(0, text=progress_text)
 
-    # LOOP THROUGH MODELS INDIVIDUALLY TO PREVENT TOTAL FAILURE
+    # LOOP THROUGH MODELS INDIVIDUALLY
     for i, m in enumerate(models):
         url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+        # We use rounded floats to ensure the API accepts the numbers
         params = {
-            "latitude": lat, "longitude": lon, 
+            "latitude": float(lat), "longitude": float(lon), 
             "daily": "temperature_2m_max", "models": m, "timezone": "auto"
         }
         
@@ -70,19 +71,21 @@ if run_btn:
             if resp.status_code == 200:
                 data = resp.json()
                 key = f'temperature_2m_max_{m}'
-                val = data['daily'][key][0]
-                if val is not None:
-                    weather_data.append({"Model": m.split('_')[0].upper(), "Max Temp": val})
-                    temps.append(val)
+                if 'daily' in data and key in data['daily']:
+                    val = data['daily'][key][0]
+                    if val is not None:
+                        weather_data.append({"Model": m.split('_')[0].upper(), "Max Temp": val})
+                        temps.append(val)
         except:
-            continue # If one model fails, just move to the next one
+            # SILENT FAILURE: If one model is down, we skip it
+            pass
         
         my_bar.progress((i + 1) / len(models), text=progress_text)
     
     my_bar.empty()
 
     if not temps:
-        st.error("All weather models failed for this location. This usually happens with very specific airport codes. Please try a broader city name like 'London' or 'New York'.")
+        st.error("All models failed for this exact spot. Try a broader city name like 'London' or 'New York' instead of a specific airport.")
     else:
         avg_temp = statistics.mean(temps)
         model_prob = len([t for t in temps if t >= target_temp]) / len(temps)
@@ -110,6 +113,7 @@ if run_btn:
             
             st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_content_allowed=True)
             st.metric("Calculated Edge", f"{edge*100:.1f}%")
+            st.caption(f"Based on {len(temps)} active models.")
 
 else:
     with col1: st.info("Search a city and click 'Calculate' to begin.")
