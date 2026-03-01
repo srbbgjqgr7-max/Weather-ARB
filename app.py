@@ -25,8 +25,8 @@ with st.sidebar:
     bet_side = st.radio("Analyzing Side:", ["Yes (> Target)", "No (≤ Target)"])
     
     col_p1, col_p2 = st.columns(2)
-    yes_p = col_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50)
-    no_p = col_p2.number_input("'No' Price", 0.01, 0.99, 0.50)
+    yes_p = col_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50, step=0.01)
+    no_p = col_p2.number_input("'No' Price", 0.01, 0.99, 0.50, step=0.01)
     
     st.header("⚖️ Model Weights")
     w_ecmwf = st.slider("ECMWF weight", 1.0, 5.0, 2.0)
@@ -40,39 +40,54 @@ with st.sidebar:
 
 # --- ASYNC FETCHING ENGINE ---
 async def fetch_model(session, name, model_id, weight, lat, lon, date_str):
-    # Try exact coordinates first, then rounded (0.25° grid)
     coords = [(lat, lon), (round(lat * 4) / 4, round(lon * 4) / 4)]
     
     for t_lat, t_lon in coords:
+        if name == "ECMWF":
+            base_url = "https://api.open-meteo.com/v1/ecmwf"
+            models_param = ""  # Dedicated endpoint – no &models needed (defaults to IFS HRES)
+        else:
+            base_url = "https://api.open-meteo.com/v1/forecast"
+            models_param = f"&models={model_id}"
+        
         url = (
-            f"https://api.open-meteo.com/v1/forecast?"
+            f"{base_url}?"
             f"latitude={t_lat}&longitude={t_lon}&"
-            f"daily=temperature_2m_max&"
-            f"models={model_id}&"
+            f"daily=temperature_2m_max"
+            f"{models_param}&"
             f"timezone=auto&"
             f"start_date={date_str}&end_date={date_str}"
         )
+        
         try:
-            async with session.get(url, timeout=12) as response:
+            async with session.get(url, timeout=15) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'daily' in data and 'temperature_2m_max' in data['daily']:
                         val = data['daily']['temperature_2m_max'][0]
                         if val is not None:
+                            st.write(f"Success: {name} returned {val}°C")  # Optional visible debug
                             return {"Model": name, "Temp": val, "Weight": weight}
-        except Exception:
+                    else:
+                        print(f"No temp data in response for {name} at {t_lat},{t_lon}")
+                else:
+                    print(f"HTTP {response.status} for {name} URL: {url}")
+        except Exception as e:
+            print(f"Fetch error for {name}: {str(e)} - URL: {url}")
             continue
+    
+    print(f"Failed to fetch {name} after all attempts")
     return None
 
-async def run_ensemble(lat, lon, date_str, weights):
+async def run_ensemble(lat, lon, date_str):
     model_cfg = {
-        "ECMWF":       ("ecmwf_ifs04", weights[1]),
-        "GFS":         ("gfs_seamless", weights[1]),
-        "ICON":        ("icon_global", weights[2]),
+        "ECMWF":       ("", w_ecmwf),               # Dedicated endpoint, no model_id needed
+        "GFS":         ("gfs_seamless", w_gfs),
+        "ICON":        ("icon_global", w_icon),
         "GEM":         ("gem_global", 1.0),
         "ACCESS-G":    ("access_g", 1.0),
-        "ICON-EU":     ("icon_eu", 1.2),           # regional – may not cover everywhere
-        "ICON-D2":     ("icon_d2", 1.5),           # Germany + nearby only
+        "ICON-EU":     ("icon_eu", 1.2),            # Europe only – may fail outside
+        "ICON-D2":     ("icon_d2", 1.5),            # Germany/central Europe only
         "ARPEGE":      ("arpege_world", 1.0),
         "CMA-GFS":     ("cma_gfs_grapes", 1.0),
         "JMA":         ("jma_gsm", 1.0),
@@ -84,7 +99,6 @@ async def run_ensemble(lat, lon, date_str, weights):
             for name, (m_id, weight) in model_cfg.items()
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        # Filter out exceptions and None results
         valid_results = [r for r in results if not isinstance(r, Exception) and r is not None]
         return valid_results
 
@@ -102,20 +116,20 @@ if run_btn:
         # Run async fetching
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(run_ensemble(lat, lon, date_str, [w_ecmwf, w_gfs, w_icon]))
+        results = loop.run_until_complete(run_ensemble(lat, lon, date_str))
         weather_results = [r for r in results if r is not None]
 
         if weather_results:
-            # ── Stats & Agreement ────────────────────────────────────────
+            # Stats & Agreement
             core_temps = [r["Temp"] for r in weather_results if r["Model"] in ["ECMWF", "GFS", "ICON"]]
             spread = max(core_temps) - min(core_temps) if len(core_temps) > 1 else 0
             agreement = "Strong" if spread < 1.5 else "Moderate" if spread < 3 else "Weak (Risky)"
             
             total_w = sum(r["Weight"] for r in weather_results)
-            w_avg = sum(r["Temp"] * r["Weight"] for r in weather_results) / total_w
-            p_yes = sum(r["Weight"] for r in weather_results if r["Temp"] > target_temp) / total_w
+            w_avg = sum(r["Temp"] * r["Weight"] for r in weather_results) / total_w if total_w > 0 else 0
+            p_yes = sum(r["Weight"] for r in weather_results if r["Temp"] > target_temp) / total_w if total_w > 0 else 0
             
-            # ── Betting Logic ────────────────────────────────────────────
+            # Betting Logic
             m_prob = p_yes if "Yes" in bet_side else (1.0 - p_yes)
             m_price = yes_p if "Yes" in bet_side else no_p
             edge = m_prob - m_price
@@ -180,6 +194,6 @@ if run_btn:
                     elif m_price < m_prob - 0.02:
                         st.success(f"Potential edge — price below break-even")
         else:
-            st.error("No model data returned for this location/date. Try:\n• A major city\n• Date within ~10–14 days\n• Check Open-Meteo model availability")
+            st.error("No model data returned. Check console/terminal for fetch errors. Try a closer date (forecasts usually 0–15 days) or major city.")
     else:
-        st.error("Could not geocode the location. Please try a different address or spelling.")
+        st.error("Could not geocode the location. Try a different address.")
