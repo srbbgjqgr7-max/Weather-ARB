@@ -9,34 +9,37 @@ from datetime import datetime, date, timedelta
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Quant Pro")
-geolocator = Nominatim(user_agent="weather_arb_ultimate_v2026")
+geolocator = Nominatim(user_agent="weather_arb_v2026_final")
 
 st.title("🌡️ Weather Arb: 10-Model Consensus Terminal")
+st.markdown("Global Ensemble Consensus + Fixed Stake Analysis")
 
-# --- SIDEBAR & WEIGHT EDITOR ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("📍 Location & Date")
     address = st.text_input("Target City", "London, UK")
     selected_date = st.date_input("Forecast Date", value=date.today() + timedelta(days=1))
     
     st.header("🎯 Market Parameters")
-    target_temp = st.slider("Hurdle (°C)", 10.0, 45.0, 30.0, step=0.5)
+    target_temp = st.slider("Polymarket Hurdle (°C)", 10.0, 45.0, 30.0, step=0.5)
     bet_side = st.radio("Analyzing Side:", ["Yes (> Target)", "No (≤ Target)"])
-    yes_p = st.number_input("'Yes' Price", 0.01, 0.99, 0.50)
-    no_p = st.number_input("'No' Price", 0.01, 0.99, 0.50)
     
-    st.header("⚖️ Model Weight Editor")
-    w_ecmwf = st.slider("ECMWF Weight", 1.0, 5.0, 2.0)
-    w_gfs = st.slider("GFS Weight", 1.0, 5.0, 2.0)
-    w_icon = st.slider("ICON Weight", 1.0, 5.0, 1.5)
+    col_p1, col_p2 = st.columns(2)
+    yes_p = col_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50)
+    no_p = col_p2.number_input("'No' Price", 0.01, 0.99, 0.50)
     
-    st.header("💰 Risk")
-    bankroll = st.number_input("Bankroll ($)", 10, 100000, 1000)
+    st.header("⚖️ Model Weights")
+    w_ecmwf = st.slider("ECMWF weight", 1.0, 5.0, 2.0)
+    w_gfs = st.slider("GFS weight", 1.0, 5.0, 2.0)
+    w_icon = st.slider("ICON weight", 1.0, 5.0, 1.5)
+    
+    st.header("💰 Wager")
+    wager_amount = st.number_input("Bet Amount ($)", 1, 10000, 100)
+    
     run_btn = st.button("Analyze Consensus", type="primary")
 
-# --- ASYNC ENGINE ---
+# --- ASYNC FETCHING ENGINE ---
 async def fetch_model(session, name, m_id, weight, lat, lon, date_str):
-    # Coordinate snapping for better model hits
     coords = [(lat, lon), (round(lat * 4) / 4, round(lon * 4) / 4)]
     for t_lat, t_lon in coords:
         url = (f"https://ensemble-api.open-meteo.com/v1/ensemble?"
@@ -73,32 +76,42 @@ if run_btn:
         lat, lon = loc.latitude, loc.longitude
         date_str = selected_date.strftime("%Y-%m-%d")
         
-        # Using loop to handle async in Streamlit
+        # Async execution wrapper
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         results = loop.run_until_complete(run_ensemble(lat, lon, date_str, [w_ecmwf, w_gfs, w_icon]))
         weather_results = [r for r in results if r is not None]
 
         if weather_results:
-            # Stats
+            # Stats & Agreement
+            core_temps = [r["Temp"] for r in weather_results if r["Model"] in ["ECMWF", "GFS", "ICON"]]
+            spread = max(core_temps) - min(core_temps) if len(core_temps) > 1 else 0
+            agreement = "Strong" if spread < 1.5 else "Moderate" if spread < 3 else "Weak (Risky)"
+            
             total_w = sum(r["Weight"] for r in weather_results)
             w_avg = sum(r["Temp"] * r["Weight"] for r in weather_results) / total_w
             p_yes = sum(r["Weight"] for r in weather_results if r["Temp"] > target_temp) / total_w
             
+            # Betting Logic
             m_prob = p_yes if "Yes" in bet_side else (1.0 - p_yes)
             m_price = yes_p if "Yes" in bet_side else no_p
             edge = m_prob - m_price
+            
+            total_payout = wager_amount / m_price
+            net_profit = total_payout - wager_amount
 
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader(f"🌐 Ensemble Coverage ({len(weather_results)}/10)")
                 st.table(pd.DataFrame(weather_results))
+                st.metric("Model Agreement Score", agreement, delta=f"{spread:.1f}°C Spread", delta_color="inverse")
+                
                 fig_hist = px.histogram(pd.DataFrame(weather_results), x="Temp", nbins=10, title="Spread Distribution")
                 fig_hist.add_vline(x=target_temp, line_dash="dash", line_color="red")
                 st.plotly_chart(fig_hist, use_container_width=True)
 
             with col2:
-                st.subheader("📊 Quant Analysis")
+                st.subheader("📊 Quant Results")
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number", value=w_avg, title={'text': "Weighted Mean (°C)"},
                     gauge={'axis': {'range': [None, 45]}, 'threshold': {'line': {'color': "red", 'width': 4}, 'value': target_temp}}
@@ -111,13 +124,18 @@ if run_btn:
                 m3.metric("Edge", f"{edge*100:.1f}%")
 
                 st.divider()
-                if edge > 0:
-                    kelly = (m_prob - m_price) / (1 - m_price)
-                    stake = bankroll * kelly * 0.25 # Quarter Kelly for safety
-                    st.success(f"🔥 Positive Edge! Stake: **${max(0, stake):.2f}**")
-                    st.write(f"Break-even Price: **${m_prob:.2f}**")
-                    st.write(f"Potential Net Profit: **${((stake/m_price)-stake):.2f}**")
-                else:
-                    st.error("❄️ Overvalued: No edge found.")
+                color = "green" if edge > 0.05 else "red" if edge < -0.05 else "gray"
+                status = "UNDERVALUED" if edge > 0.05 else "OVERVALUED" if edge < -0.05 else "EFFICIENT"
+                st.markdown(f"### Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+                
+                p_c1, p_c2 = st.columns(2)
+                with p_c1:
+                    st.write(f"Potential **Net Profit**: **${net_profit:.2f}**")
+                    st.write(f"Total Payout: **${total_payout:.2f}**")
+                with p_c2:
+                    st.write(f"🎯 **Break-even Price**: **${m_prob:.2f}**")
+                    st.info(f"Avoid buying if price > ${m_prob:.2f}")
+        else:
+            st.error("No model data found. Try rounding coordinates or a closer date.")
     else:
         st.error("Location not found.")
