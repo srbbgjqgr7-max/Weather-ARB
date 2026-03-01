@@ -7,7 +7,7 @@ from geopy.geocoders import Nominatim
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_final_v7")
+geolocator = Nominatim(user_agent="weather_arb_final_v8")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -71,9 +71,7 @@ if run_btn:
     if not temps:
         st.error("The weather server is rejecting these coordinates. Try a broader city name.")
     else:
-        # --- CALCULATIONS ---
         avg_temp = statistics.mean(temps)
-        # Probability that temp is >= target
         model_prob = len([t for t in temps if t >= target_temp]) / len(temps)
         edge = model_prob - market_price
 
@@ -82,7 +80,8 @@ if run_btn:
             st.table(pd.DataFrame(weather_data))
             fig = px.histogram(x=temps, nbins=5, title="Model Spread", labels={'x': 'Temp °C'})
             fig.add_vline(x=target_temp, line_dash="dash", line_color="red")
-            st.plotly_chart(fig, use_container_width=True)
+            # Updated for 2026 syntax
+            st.plotly_chart(fig, width="stretch")
 
         with col2:
             st.subheader("⚖️ Market Analysis")
@@ -94,7 +93,6 @@ if run_btn:
             
             st.divider()
             
-            # Robust status logic
             if edge > 0.05:
                 status, color = "UNDERVALUED", "green"
             elif edge < -0.05:
@@ -102,8 +100,8 @@ if run_btn:
             else:
                 status, color = "EFFICIENT", "gray"
             
-            # Fixed markdown display
-            st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_content_allowed=True)
+            # FIX: Changed unsafe_content_allowed to unsafe_allow_html
+            st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
             st.metric("Calculated Edge", f"{edge*100:.1f}%")
 
 else:
