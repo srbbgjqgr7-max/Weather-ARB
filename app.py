@@ -7,7 +7,7 @@ from geopy.geocoders import Nominatim
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_final_v6")
+geolocator = Nominatim(user_agent="weather_arb_final_v7")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -18,12 +18,10 @@ st.markdown("Compare the 'Big 8' Global Weather Models against Market Odds.")
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("📍 Search Location")
-    
     address_input = st.text_input("Enter City", "London, UK")
 
     location = geolocator.geocode(address_input, timeout=10)
     if location:
-        # We format as strings first to ensure NO extra trailing digits are sent
         lat_str = "{:.2f}".format(location.latitude)
         lon_str = "{:.2f}".format(location.longitude)
         st.success(f"Coordinates: {lat_str}, {lon_str}")
@@ -40,7 +38,6 @@ with st.sidebar:
 col1, col2 = st.columns(2)
 
 if run_btn:
-    # We use the most stable identifiers for these 8 models
     models = [
         "ecmwf_ifs025", "gfs_seamless", "icon_seamless", "gem_seamless", 
         "jma_seamless", "bom_access_g_global", "arpege_world", "cma_grapes_global"
@@ -53,33 +50,30 @@ if run_btn:
     my_bar = st.progress(0, text=progress_text)
 
     for i, m in enumerate(models):
-        # NEW URL STRATEGY: We build the URL manually to ensure zero formatting errors
         url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat_str}&longitude={lon_str}&daily=temperature_2m_max&models={m}&timezone=auto"
-        
         try:
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                # Dynamically find the key because the API sometimes changes the suffix
                 daily_keys = data.get('daily', {}).keys()
                 temp_key = [k for k in daily_keys if 'temperature_2m_max' in k]
-                
                 if temp_key:
                     val = data['daily'][temp_key[0]][0]
                     if val is not None:
                         weather_data.append({"Model": m.split('_')[0].upper(), "Max Temp": val})
                         temps.append(val)
-        except Exception as e:
-            pass # Skip failed models silently
-        
+        except:
+            pass
         my_bar.progress((i + 1) / len(models), text=progress_text)
     
     my_bar.empty()
 
     if not temps:
-        st.error("The weather server is rejecting these coordinates. Try searching for a different nearby city (e.g., 'Watford' or 'Croydon') to reset the grid locator.")
+        st.error("The weather server is rejecting these coordinates. Try a broader city name.")
     else:
+        # --- CALCULATIONS ---
         avg_temp = statistics.mean(temps)
+        # Probability that temp is >= target
         model_prob = len([t for t in temps if t >= target_temp]) / len(temps)
         edge = model_prob - market_price
 
@@ -95,14 +89,20 @@ if run_btn:
             st.metric("Ensemble Mean", f"{avg_temp:.1f}°C")
             
             c1, c2 = st.columns(2)
-            c1.metric("Market Prob", f"{market_price*100:.0f}%")
-            c2.metric("Model Prob", f"{model_prob*100:.0f}%")
+            c1.metric("Market Prob", f"{int(market_price*100)}%")
+            c2.metric("Model Prob", f"{int(model_prob*100)}%")
             
             st.divider()
             
-            color = "green" if edge > 0 else "red" if edge < 0 else "gray"
-            status = "UNDERVALUED" if edge > 0 else "OVERVALUED" if edge < 0 else "EFFICIENT"
+            # Robust status logic
+            if edge > 0.05:
+                status, color = "UNDERVALUED", "green"
+            elif edge < -0.05:
+                status, color = "OVERVALUED", "red"
+            else:
+                status, color = "EFFICIENT", "gray"
             
+            # Fixed markdown display
             st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_content_allowed=True)
             st.metric("Calculated Edge", f"{edge*100:.1f}%")
 
