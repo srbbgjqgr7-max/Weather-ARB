@@ -5,119 +5,161 @@ import statistics
 import plotly.express as px
 from geopy.geocoders import Nominatim
 from datetime import datetime, date, timedelta
+import time
 
 # --- PAGE CONFIG ---
-st.set_page_config(layout="wide", page_title="Weather Arb Quant Pro")
-geolocator = Nominatim(user_agent="weather_arb_ultimate_v2")
+st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
+geolocator = Nominatim(user_agent="weather_arb_v15_inclusive")
 
-# --- INITIAL MODEL CONFIG ---
-MODEL_LIST = {
-    "ECMWF": "ecmwf_ifs025", "GFS": "gfs_seamless", "ICON": "icon_seamless",
-    "GEM": "gem_seamless", "JMA": "jma_seamless", "BOM": "bom_access_g_global",
-    "ARPEGE": "arpege_world", "CMA": "cma_grapes_global"
-}
+st.title("🌡️ Weather vs. Polymarket Arbitrage")
+st.markdown("Global Ensemble Models + Date Selection + **Inclusive 'No' Logic (≤ Target)**")
 
-st.title("🌡️ Weather Arb: Dynamic Quant Terminal")
-
-# --- SHARED SIDEBAR ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("📍 Global Settings")
-    address = st.text_input("Target City", "London, UK")
-    location = geolocator.geocode(address, timeout=10)
-    lat, lon = (round(location.latitude, 2), round(location.longitude, 2)) if location else (51.5, -0.1)
+    st.header("📍 Location & Date")
+    address_input = st.text_input("Enter City", "London, UK")
     
-    st.header("⚙️ Risk Strategy")
-    use_kelly = st.toggle("Enable Kelly Criterion", value=True)
-    if use_kelly:
-        bankroll = st.number_input("Total Bankroll ($)", 100, 1000000, 1000)
-        kelly_fraction = st.select_slider("Kelly Multiplier", options=[0.1, 0.25, 0.5, 1.0], value=0.25)
+    max_forecast_date = date.today() + timedelta(days=14)
+    selected_date = st.date_input(
+        "Forecast Date", 
+        value=date.today() + timedelta(days=1),
+        min_value=date.today(),
+        max_value=max_forecast_date
+    )
+
+    location = geolocator.geocode(address_input, timeout=10)
+    if location:
+        lat, lon = round(location.latitude, 2), round(location.longitude, 2)
+        st.success(f"Coordinates: {lat}, {lon}")
     else:
-        unit_size = st.number_input("Fixed Bet Size ($)", 1, 10000, 100)
+        lat, lon = 51.5, -0.1
 
-    st.header("🧠 Weighting Engine")
-    auto_weight = st.toggle("Enable Dynamic Weighting", value=True, help="Automatically increases weights for models with low historical error.")
+    st.header("🎯 Market Parameters")
+    target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
+    
+    # Updated labels for clarity
+    bet_side = st.radio("Analyzing Side:", ["Yes (Strictly Above >)", "No (Lower or Equal ≤)"])
+    
+    c_p1, c_p2 = st.columns(2)
+    yes_price = c_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50)
+    no_price = c_p2.number_input("'No' Price", 0.01, 0.99, 0.50)
 
-# --- DYNAMIC WEIGHTING LOGIC ---
-weights = {m: 1.0 for m in MODEL_LIST} # Default equal weights
+    st.header("💰 Wager Settings")
+    wager_amount = st.number_input("Wager Amount ($)", 10, 10000, 100)
 
-if auto_weight:
-    with st.status("Calculating Dynamic Weights...", expanded=False):
-        end_d = date.today() - timedelta(days=1)
-        start_d = end_d - timedelta(days=4)
-        try:
-            # Get Ground Truth
-            act_url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_d}&end_date={end_d}&daily=temperature_2m_max&timezone=auto"
-            actuals = requests.get(act_url).json()['daily']['temperature_2m_max']
-            
-            for name, m_id in MODEL_LIST.items():
-                f_url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_d}&end_date={end_d}&daily=temperature_2m_max&models={m_id}&timezone=auto"
-                f_data = requests.get(f_url).json()['daily'][f"temperature_2m_max_{m_id}"]
-                mae = statistics.mean([abs(f - a) for f, a in zip(f_data, actuals) if f and a])
-                # Accuracy Boost: Models with error < 1°C get 3x weight, < 2.5°C get 2x weight
-                weights[name] = 3.0 if mae < 1.0 else 2.0 if mae < 2.5 else 1.0
-        except:
-            st.warning("Could not calculate dynamic weights. Using defaults.")
+    run_btn = st.button("Calculate Edge", type="primary")
 
-# --- TABS ---
-tab1, tab2 = st.tabs(["🚀 Arbitrage Engine", "📊 Accuracy Scorecard"])
+# --- MAIN APP LOGIC ---
+col1, col2 = st.columns(2)
 
-# --- TAB 1: ARBITRAGE ---
-with tab1:
-    col_a, col_b = st.columns([1, 2])
-    with col_a:
-        target_date = st.date_input("Forecast Date", value=date.today() + timedelta(days=1))
-        target_temp = st.slider("Hurdle (°C)", 10.0, 45.0, 30.0, step=0.5)
-        bet_side = st.radio("Bet Side:", ["Yes (> Target)", "No (≤ Target)"])
-        y_price = st.number_input("'Yes' Price", 0.01, 0.99, 0.50)
-        n_price = st.number_input("'No' Price", 0.01, 0.99, 0.50)
-        run_arb = st.button("Calculate Edge", type="primary")
+if run_btn:
+    date_str = selected_date.strftime("%Y-%m-%d")
+    
+    model_config = {
+        "ECMWF": {"id": "ecmwf_ifs025", "weight": 2.0},
+        "GFS": {"id": "gfs_seamless", "weight": 2.0},
+        "ICON": {"id": "icon_seamless", "weight": 1.0},
+        "GEM": {"id": "gem_seamless", "weight": 1.0},
+        "JMA": {"id": "jma_seamless", "weight": 1.0},
+        "BOM": {"id": "bom_access_g_global", "weight": 1.0},
+        "ARPEGE": {"id": "arpege_world", "weight": 1.0},
+        "CMA": {"id": "cma_grapes_global", "weight": 1.0}
+    }
+    
+    weather_results = []
+    weighted_votes_above = []
+    total_possible_weight = 0
+    
+    progress_bar = st.progress(0, text=f"Fetching Models for {date_str}...")
 
-    if run_arb:
-        date_str = target_date.strftime("%Y-%m-%d")
-        weather_results, weighted_votes_above, total_weight = [], [], 0
+    for i, (name, config) in enumerate(model_config.items()):
+        api_id = config["id"]
+        weight = config["weight"]
+        coords_to_try = [(lat, lon), (round(lat, 1), round(lon, 1))]
         
-        for name, m_id in MODEL_LIST.items():
-            url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat}&longitude={lon}&daily=temperature_2m_max&models={m_id}&timezone=auto&start_date={date_str}&end_date={date_str}"
+        for try_lat, try_lon in coords_to_try:
+            url = (f"https://ensemble-api.open-meteo.com/v1/ensemble?"
+                   f"latitude={try_lat}&longitude={try_lon}&daily=temperature_2m_max&"
+                   f"models={api_id}&timezone=auto&start_date={date_str}&end_date={date_str}")
             try:
-                val = requests.get(url).json()['daily'][f"temperature_2m_max_{m_id}"][0]
-                if val is not None:
-                    w = weights[name]
-                    weather_results.append({"Model": name, "Temp": val, "Weight": w})
-                    weighted_votes_above.append((1 if val > target_temp else 0) * w)
-                    total_weight += w
-            except: continue
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    temp_key = [k for k in data.get('daily', {}).keys() if 'temperature_2m_max' in k]
+                    if temp_key:
+                        val = data['daily'][temp_key[0]][0]
+                        if val is not None:
+                            weather_results.append({"Model": name, "Max Temp": val, "Weight": weight})
+                            
+                            # LOGIC CHANGE: 
+                            # 'Yes' only wins if strictly GREATER than target
+                            is_above = 1 if val > target_temp else 0
+                            weighted_votes_above.append(is_above * weight)
+                            
+                            total_possible_weight += weight
+                            break
+            except:
+                continue
+        progress_bar.progress((i + 1) / len(model_config))
+    
+    progress_bar.empty()
 
-        if weather_results:
-            prob_yes = round(sum(weighted_votes_above) / total_weight, 4)
-            mod_prob = prob_yes if "Yes" in bet_side else (1.0 - prob_yes)
-            curr_mkt = y_price if "Yes" in bet_side else n_price
-            edge = mod_prob - curr_mkt
+    if not weather_results:
+        st.error(f"No model data found for {date_str}.")
+    else:
+        # --- CALCULATIONS ---
+        avg_temp = statistics.mean([r["Max Temp"] for r in weather_results])
+        
+        # YES Probability (Strictly Above)
+        prob_above = round(sum(weighted_votes_above) / total_possible_weight, 2)
+        
+        # NO Probability (Lower or Equal)
+        prob_below = 1.0 - prob_above
+        
+        # Determine Market vs Model comparison based on selection
+        if "Yes" in bet_side:
+            curr_mkt = yes_price
+            mod_prob = prob_above
+        else:
+            curr_mkt = no_price
+            mod_prob = prob_below
+            
+        edge = mod_prob - curr_mkt
+        total_payout = wager_amount / curr_mkt
+        net_profit = total_payout - wager_amount
 
-            with col_b:
-                st.subheader("⚖️ Analysis Results")
-                res_1, res_2, res_3 = st.columns(3)
-                res_1.metric("Weighted Prob", f"{mod_prob*100:.1f}%")
-                res_2.metric("Market Price", f"${curr_mkt:.2f}")
-                res_3.metric("Edge", f"{edge*100:.1f}%")
+        with col1:
+            st.subheader(f"🌐 {date_str} Results ({len(weather_results)}/8)")
+            st.table(pd.DataFrame(weather_results))
+            
+            fig = px.histogram(x=[r["Max Temp"] for r in weather_results], nbins=8, 
+                               title=f"Ensemble Spread for {date_str}", labels={'x': 'Temp °C'})
+            fig.add_vline(x=target_temp, line_dash="dash", line_color="red", annotation_text="Hurdle")
+            st.plotly_chart(fig, width="stretch")
 
-                if edge > 0:
-                    if use_kelly:
-                        raw_k = (mod_prob - curr_mkt) / (1 - curr_mkt)
-                        stake = bankroll * raw_k * kelly_fraction
-                        st.success(f"🔥 Positive Edge! Optimal Kelly Stake: **${stake:.2f}**")
-                    else:
-                        st.success(f"🔥 Positive Edge! Suggested Fixed Stake: **${unit_size:.2f}**")
-                else:
-                    st.error("❄️ Negative Edge. Avoid this bet.")
+        with col2:
+            st.subheader(f"⚖️ Betting Analysis: {bet_side}")
+            m1, m2 = st.columns(2)
+            m1.metric("Market Price", f"${curr_mkt:.2f}")
+            m2.metric("Weighted Prob", f"{int(mod_prob*100)}%")
+            
+            st.divider()
+            
+            color = "green" if edge > 0.05 else "red" if edge < -0.05 else "gray"
+            status = "UNDERVALUED" if edge > 0.05 else "OVERVALUED" if edge < -0.05 else "EFFICIENT"
+            st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+            st.metric("Calculated Edge", f"{edge*100:.1f}%")
 
-                st.divider()
-                st.write("**Current Model Weights:**", weights)
-                st.dataframe(pd.DataFrame(weather_results), hide_index=True)
+            st.subheader("💰 Risk/Reward")
+            p1, p2 = st.columns(2)
+            p1.metric("Potential Profit", f"${net_profit:.2f}")
+            p2.metric("ROI", f"{int((net_profit/wager_amount)*100)}%")
+            
+            # Contextual Reminder
+            if "No" in bet_side:
+                st.info(f"ℹ️ 'No' wins if the temp is {target_temp}°C or lower.")
+            else:
+                st.info(f"ℹ️ 'Yes' wins if the temp is strictly above {target_temp}°C.")
 
-# --- TAB 2: SCORECARD ---
-with tab2:
-    st.subheader("🏆 Accuracy Leaderboard")
-    if st.button("Refresh Audit"):
-        st.rerun()
-    # Display the weights used based on the last audit
-    st.write("Weights are assigned based on Mean Absolute Error (MAE) from the last 4 days.")
+else:
+    st.info(f"👈 Select your target date and click 'Calculate'.")
