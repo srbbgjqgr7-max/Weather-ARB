@@ -9,10 +9,10 @@ import time
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_v15_inclusive")
+geolocator = Nominatim(user_agent="weather_arb_v16_kelly")
 
 st.title("🌡️ Weather vs. Polymarket Arbitrage")
-st.markdown("Global Ensemble Models + Date Selection + **Inclusive 'No' Logic (≤ Target)**")
+st.markdown("Global Ensemble Models + Date Selection + Kelly Criterion Management")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -28,33 +28,32 @@ with st.sidebar:
     )
 
     location = geolocator.geocode(address_input, timeout=10)
-    if location:
-        lat, lon = round(location.latitude, 2), round(location.longitude, 2)
-        st.success(f"Coordinates: {lat}, {lon}")
-    else:
-        lat, lon = 51.5, -0.1
+    lat, lon = (round(location.latitude, 2), round(location.longitude, 2)) if location else (51.5, -0.1)
 
     st.header("🎯 Market Parameters")
     target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
-    
-    # Updated labels for clarity
     bet_side = st.radio("Analyzing Side:", ["Yes (Strictly Above >)", "No (Lower or Equal ≤)"])
     
     c_p1, c_p2 = st.columns(2)
     yes_price = c_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50)
     no_price = c_p2.number_input("'No' Price", 0.01, 0.99, 0.50)
 
-    st.header("💰 Wager Settings")
-    wager_amount = st.number_input("Wager Amount ($)", 10, 10000, 100)
+    st.header("💰 Kelly Bankroll Management")
+    total_bankroll = st.number_input("Total Bankroll ($)", 100, 1000000, 1000)
+    kelly_fraction = st.select_slider(
+        "Kelly Multiplier (Aggression)", 
+        options=[0.1, 0.25, 0.5, 1.0], 
+        value=0.25,
+        help="0.25 (Quarter Kelly) is recommended for safety."
+    )
 
-    run_btn = st.button("Calculate Edge", type="primary")
+    run_btn = st.button("Calculate Optimal Bet", type="primary")
 
 # --- MAIN APP LOGIC ---
 col1, col2 = st.columns(2)
 
 if run_btn:
     date_str = selected_date.strftime("%Y-%m-%d")
-    
     model_config = {
         "ECMWF": {"id": "ecmwf_ifs025", "weight": 2.0},
         "GFS": {"id": "gfs_seamless", "weight": 2.0},
@@ -66,21 +65,14 @@ if run_btn:
         "CMA": {"id": "cma_grapes_global", "weight": 1.0}
     }
     
-    weather_results = []
-    weighted_votes_above = []
-    total_possible_weight = 0
-    
-    progress_bar = st.progress(0, text=f"Fetching Models for {date_str}...")
+    weather_results, weighted_votes_above, total_weight = [], [], 0
+    progress_bar = st.progress(0, text=f"Analyzing {date_str}...")
 
     for i, (name, config) in enumerate(model_config.items()):
-        api_id = config["id"]
-        weight = config["weight"]
+        api_id, weight = config["id"], config["weight"]
         coords_to_try = [(lat, lon), (round(lat, 1), round(lon, 1))]
-        
-        for try_lat, try_lon in coords_to_try:
-            url = (f"https://ensemble-api.open-meteo.com/v1/ensemble?"
-                   f"latitude={try_lat}&longitude={try_lon}&daily=temperature_2m_max&"
-                   f"models={api_id}&timezone=auto&start_date={date_str}&end_date={date_str}")
+        for t_lat, t_lon in coords_to_try:
+            url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={t_lat}&longitude={t_lon}&daily=temperature_2m_max&models={api_id}&timezone=auto&start_date={date_str}&end_date={date_str}"
             try:
                 resp = requests.get(url, timeout=10)
                 if resp.status_code == 200:
@@ -90,76 +82,59 @@ if run_btn:
                         val = data['daily'][temp_key[0]][0]
                         if val is not None:
                             weather_results.append({"Model": name, "Max Temp": val, "Weight": weight})
-                            
-                            # LOGIC CHANGE: 
-                            # 'Yes' only wins if strictly GREATER than target
-                            is_above = 1 if val > target_temp else 0
-                            weighted_votes_above.append(is_above * weight)
-                            
-                            total_possible_weight += weight
+                            weighted_votes_above.append((1 if val > target_temp else 0) * weight)
+                            total_weight += weight
                             break
-            except:
-                continue
+            except: continue
         progress_bar.progress((i + 1) / len(model_config))
-    
     progress_bar.empty()
 
-    if not weather_results:
-        st.error(f"No model data found for {date_str}.")
-    else:
-        # --- CALCULATIONS ---
+    if weather_results:
         avg_temp = statistics.mean([r["Max Temp"] for r in weather_results])
-        
-        # YES Probability (Strictly Above)
-        prob_above = round(sum(weighted_votes_above) / total_possible_weight, 2)
-        
-        # NO Probability (Lower or Equal)
+        prob_above = round(sum(weighted_votes_above) / total_weight, 2)
         prob_below = 1.0 - prob_above
         
-        # Determine Market vs Model comparison based on selection
-        if "Yes" in bet_side:
-            curr_mkt = yes_price
-            mod_prob = prob_above
-        else:
-            curr_mkt = no_price
-            mod_prob = prob_below
-            
+        curr_mkt = yes_price if "Yes" in bet_side else no_price
+        mod_prob = prob_above if "Yes" in bet_side else prob_below
         edge = mod_prob - curr_mkt
-        total_payout = wager_amount / curr_mkt
-        net_profit = total_payout - wager_amount
+
+        # --- KELLY CRITERION FORMULA ---
+        # f* = (p * (b - 1) - q) / (b - 1)
+        # In Prediction Markets: b = 1 / price
+        # Simplified for binary markets: f* = (Probability - Price) / (1 - Price)
+        if edge > 0:
+            raw_kelly = (mod_prob - curr_mkt) / (1 - curr_mkt)
+            suggested_stake_pct = raw_kelly * kelly_fraction
+            suggested_bet = total_bankroll * suggested_stake_pct
+        else:
+            suggested_stake_pct = 0
+            suggested_bet = 0
 
         with col1:
-            st.subheader(f"🌐 {date_str} Results ({len(weather_results)}/8)")
+            st.subheader(f"🌐 {date_str} Ensemble")
             st.table(pd.DataFrame(weather_results))
-            
-            fig = px.histogram(x=[r["Max Temp"] for r in weather_results], nbins=8, 
-                               title=f"Ensemble Spread for {date_str}", labels={'x': 'Temp °C'})
-            fig.add_vline(x=target_temp, line_dash="dash", line_color="red", annotation_text="Hurdle")
+            fig = px.histogram(x=[r["Max Temp"] for r in weather_results], nbins=8, title="Model Spread")
+            fig.add_vline(x=target_temp, line_dash="dash", line_color="red")
             st.plotly_chart(fig, width="stretch")
 
         with col2:
-            st.subheader(f"⚖️ Betting Analysis: {bet_side}")
+            st.subheader(f"⚖️ Kelly Analysis: {bet_side}")
             m1, m2 = st.columns(2)
             m1.metric("Market Price", f"${curr_mkt:.2f}")
             m2.metric("Weighted Prob", f"{int(mod_prob*100)}%")
             
             st.divider()
-            
             color = "green" if edge > 0.05 else "red" if edge < -0.05 else "gray"
-            status = "UNDERVALUED" if edge > 0.05 else "OVERVALUED" if edge < -0.05 else "EFFICIENT"
-            st.markdown(f"### <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+            st.markdown(f"### <span style='color:{color}'>{'UNDERVALUED' if edge > 0.05 else 'OVERVALUED' if edge < -0.05 else 'EFFICIENT'}</span>", unsafe_allow_html=True)
             st.metric("Calculated Edge", f"{edge*100:.1f}%")
 
-            st.subheader("💰 Risk/Reward")
-            p1, p2 = st.columns(2)
-            p1.metric("Potential Profit", f"${net_profit:.2f}")
-            p2.metric("ROI", f"{int((net_profit/wager_amount)*100)}%")
-            
-            # Contextual Reminder
-            if "No" in bet_side:
-                st.info(f"ℹ️ 'No' wins if the temp is {target_temp}°C or lower.")
+            st.subheader("🎯 Suggested Wager")
+            if suggested_bet > 0:
+                st.write(f"Based on a **{kelly_fraction}x Kelly** strategy:")
+                st.metric("Optimal Bet Size", f"${suggested_bet:.2f}", f"{suggested_stake_pct*100:.1f}% of Bank")
+                st.success(f"Strategy: Risk ${suggested_bet:.2f} to grow bankroll at the optimal long-term rate.")
             else:
-                st.info(f"ℹ️ 'Yes' wins if the temp is strictly above {target_temp}°C.")
+                st.warning("Strategy: No Edge detected. Do not place this bet.")
 
 else:
-    st.info(f"👈 Select your target date and click 'Calculate'.")
+    st.info("👈 Enter Bankroll and click 'Calculate Optimal Bet'.")
