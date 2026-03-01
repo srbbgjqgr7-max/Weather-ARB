@@ -30,7 +30,7 @@ with st.sidebar:
         lat_str, lon_str = "51.51", "-0.13"
 
     st.header("🎯 Market Parameters")
-    target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
+    target_temp = st.slider("Polymarket Hurdle (°C)", -10, 45, 30)
     market_price = st.slider("Polymarket 'Yes' Price ($)", 0.01, 0.99, 0.50)
     run_btn = st.button("Calculate Edge", type="primary")
 
