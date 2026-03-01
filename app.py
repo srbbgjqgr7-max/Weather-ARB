@@ -9,18 +9,16 @@ import time
 
 # --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Weather Arb Pro 2026")
-geolocator = Nominatim(user_agent="weather_arb_v14_dates")
+geolocator = Nominatim(user_agent="weather_arb_v15_inclusive")
 
 st.title("🌡️ Weather vs. Polymarket Arbitrage")
-st.markdown("Global Ensemble Models + Date Selection + Weighted Probability")
+st.markdown("Global Ensemble Models + Date Selection + **Inclusive 'No' Logic (≤ Target)**")
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("📍 Location & Date")
     address_input = st.text_input("Enter City", "London, UK")
     
-    # Date Selection Widget
-    # Note: Ensemble forecasts usually go out 14-16 days.
     max_forecast_date = date.today() + timedelta(days=14)
     selected_date = st.date_input(
         "Forecast Date", 
@@ -38,7 +36,9 @@ with st.sidebar:
 
     st.header("🎯 Market Parameters")
     target_temp = st.slider("Polymarket Hurdle (°C)", 10, 45, 30)
-    bet_side = st.radio("Analyzing Side:", ["Yes (Above)", "No (Below)"])
+    
+    # Updated labels for clarity
+    bet_side = st.radio("Analyzing Side:", ["Yes (Strictly Above >)", "No (Lower or Equal ≤)"])
     
     c_p1, c_p2 = st.columns(2)
     yes_price = c_p1.number_input("'Yes' Price", 0.01, 0.99, 0.50)
@@ -67,7 +67,7 @@ if run_btn:
     }
     
     weather_results = []
-    weighted_votes = []
+    weighted_votes_above = []
     total_possible_weight = 0
     
     progress_bar = st.progress(0, text=f"Fetching Models for {date_str}...")
@@ -75,12 +75,9 @@ if run_btn:
     for i, (name, config) in enumerate(model_config.items()):
         api_id = config["id"]
         weight = config["weight"]
-        
-        # Grid-snapping coords
         coords_to_try = [(lat, lon), (round(lat, 1), round(lon, 1))]
         
         for try_lat, try_lon in coords_to_try:
-            # We add start_date and end_date to the API call
             url = (f"https://ensemble-api.open-meteo.com/v1/ensemble?"
                    f"latitude={try_lat}&longitude={try_lon}&daily=temperature_2m_max&"
                    f"models={api_id}&timezone=auto&start_date={date_str}&end_date={date_str}")
@@ -93,8 +90,12 @@ if run_btn:
                         val = data['daily'][temp_key[0]][0]
                         if val is not None:
                             weather_results.append({"Model": name, "Max Temp": val, "Weight": weight})
-                            is_above = 1 if val >= target_temp else 0
-                            weighted_votes.append(is_above * weight)
+                            
+                            # LOGIC CHANGE: 
+                            # 'Yes' only wins if strictly GREATER than target
+                            is_above = 1 if val > target_temp else 0
+                            weighted_votes_above.append(is_above * weight)
+                            
                             total_possible_weight += weight
                             break
             except:
@@ -104,18 +105,26 @@ if run_btn:
     progress_bar.empty()
 
     if not weather_results:
-        st.error(f"No model data found for {date_str}. Ensemble forecasts are typically available for the next 14 days.")
+        st.error(f"No model data found for {date_str}.")
     else:
         # --- CALCULATIONS ---
         avg_temp = statistics.mean([r["Max Temp"] for r in weather_results])
-        prob_above = round(sum(weighted_votes) / total_possible_weight, 2)
-        prob_below = 1 - prob_above
         
-        curr_mkt = yes_price if "Yes" in bet_side else no_price
-        mod_prob = prob_above if "Yes" in bet_side else prob_below
+        # YES Probability (Strictly Above)
+        prob_above = round(sum(weighted_votes_above) / total_possible_weight, 2)
+        
+        # NO Probability (Lower or Equal)
+        prob_below = 1.0 - prob_above
+        
+        # Determine Market vs Model comparison based on selection
+        if "Yes" in bet_side:
+            curr_mkt = yes_price
+            mod_prob = prob_above
+        else:
+            curr_mkt = no_price
+            mod_prob = prob_below
+            
         edge = mod_prob - curr_mkt
-
-        # Risk/Reward
         total_payout = wager_amount / curr_mkt
         net_profit = total_payout - wager_amount
 
@@ -125,7 +134,7 @@ if run_btn:
             
             fig = px.histogram(x=[r["Max Temp"] for r in weather_results], nbins=8, 
                                title=f"Ensemble Spread for {date_str}", labels={'x': 'Temp °C'})
-            fig.add_vline(x=target_temp, line_dash="dash", line_color="red")
+            fig.add_vline(x=target_temp, line_dash="dash", line_color="red", annotation_text="Hurdle")
             st.plotly_chart(fig, width="stretch")
 
         with col2:
@@ -145,6 +154,12 @@ if run_btn:
             p1, p2 = st.columns(2)
             p1.metric("Potential Profit", f"${net_profit:.2f}")
             p2.metric("ROI", f"{int((net_profit/wager_amount)*100)}%")
+            
+            # Contextual Reminder
+            if "No" in bet_side:
+                st.info(f"ℹ️ 'No' wins if the temp is {target_temp}°C or lower.")
+            else:
+                st.info(f"ℹ️ 'Yes' wins if the temp is strictly above {target_temp}°C.")
 
 else:
-    st.info(f"👈 Select a target date (up to 14 days out) and click 'Calculate'.")
+    st.info(f"👈 Select your target date and click 'Calculate'.")
